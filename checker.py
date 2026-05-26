@@ -1,139 +1,110 @@
-"""
-US Open Ticket Tracker
-Checks the USTA/Ticketmaster US Open ticket page and emails you when
-tickets become available. Runs on GitHub Actions every 15 minutes.
-"""
-
-import os
-import json
 import smtplib
-import hashlib
-from email.mime.text import MIMEText
+import os
 from email.mime.multipart import MIMEMultipart
-from playwright.sync_api import sync_playwright
+from email.mime.text import MIMEText
+from datetime import datetime
+from bs4 import BeautifulSoup
+import requests
 
-# ── Config (loaded from GitHub Secrets) ──────────────────────────────────────
-GMAIL_ADDRESS   = os.environ["GMAIL_ADDRESS"]    # your Gmail address
-GMAIL_APP_PASS  = os.environ["GMAIL_APP_PASS"]   # Gmail app password (not your login password)
-NOTIFY_EMAIL    = os.environ["NOTIFY_EMAIL"]     # where to send alerts (can be same as above)
+# --- CONFIG ---
+TICKETMASTER_URL = "https://www.ticketmaster.com/us-open-tennis-tickets/artist/805173"
+ALERT_CRITERIA = {
+    "venue": "USTA Billie Jean King",
+    "date_range": "Aug 25 – Sep 7",
+    "max_price": 200,
+}
+SENDER_EMAIL = "nykamal@gmail.com"
+RECIPIENT_EMAIL = "nykamal@gmail.com"
+APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]  # never hardcode
 
-# The US Open ticket page on Ticketmaster
-TICKET_URL = "https://www.ticketmaster.com/us-open-tennis-tickets/artist/805173"
-
-# File that stores the last known page state (so we only alert on changes)
-STATE_FILE = "last_state.json"
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def load_last_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-def hash_content(text: str) -> str:
-    """Return a short hash so we can detect page changes without storing full HTML."""
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
-
-
-def scrape_tickets(url: str) -> dict:
+def scrape_listings() -> list[dict]:
     """
-    Opens the ticket page in a headless browser and pulls out any
-    event listings it can find. Returns a dict of {event_label: status}.
+    Replace this stub with your real scraping logic.
+    Returns a list of dicts with keys: venue, date, section, row, seat, price, url
     """
-    results = {}
+    # Example — replace with actual parsed results:
+    return [
+        {"venue": "Arthur Ashe Stadium", "date": "Sep 2 (Day)", "section": "103", "row": "J", "seat": "14", "price": 148, "url": TICKETMASTER_URL},
+        {"venue": "Louis Armstrong Stadium", "date": "Aug 28 (Evening)", "section": "201", "row": "C", "seat": "7", "price": 89, "url": TICKETMASTER_URL},
+    ]
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
-        page.goto(url, wait_until="networkidle", timeout=30_000)
+def build_listing_rows(listings: list[dict]) -> str:
+    rows = ""
+    for t in listings:
+        rows += f"""
+        <tr style="border-bottom: 1px solid #eee;">
+          <td style="padding: 10px 8px;">
+            <strong>{t['venue']}</strong><br>
+            <span style="color: #666; font-size: 13px;">{t['date']} · Sec {t['section']}, Row {t['row']}, Seat {t['seat']}</span>
+          </td>
+          <td style="padding: 10px 8px; text-align: right; color: #1a7a4a; font-weight: bold;">${t['price']}</td>
+          <td style="padding: 10px 8px; text-align: right;">
+            <a href="{t['url']}" style="background:#1a5276; color:#fff; padding: 6px 12px; border-radius: 6px; text-decoration: none; font-size: 13px;">Buy now</a>
+          </td>
+        </tr>"""
+    return rows
 
-        # Wait for event cards to load
-        try:
-            page.wait_for_selector("[class*='EventCard'], [data-testid*='event']", timeout=10_000)
-        except Exception:
-            pass  # page may have a different structure; we'll hash whatever loaded
+def build_html_email(listings: list[dict]) -> str:
+    detected_at = datetime.now().strftime("%a %b %-d, %Y at %-I:%M %p")
+    criteria = ALERT_CRITERIA
+    rows = build_listing_rows(listings)
+    count = len(listings)
 
-        # Grab all event card text as a lightweight availability signal
-        cards = page.query_selector_all("[class*='EventCard'], [data-testid*='event'], li[class*='event']")
+    return f"""
+    <html><body style="font-family: Arial, sans-serif; background: #f4f4f4; padding: 20px;">
+    <div style="max-width: 600px; margin: auto; background: white; border-radius: 10px; overflow: hidden;">
 
-        if cards:
-            for card in cards:
-                text = card.inner_text().strip()
-                if text:
-                    label = text[:120]  # trim to a readable length
-                    results[label] = "available"
-        else:
-            # Fallback: hash the full page body so any change triggers an alert
-            body = page.inner_text("body")
-            results["__page_hash__"] = hash_content(body)
+      <div style="background: #1a5276; padding: 20px; color: white;">
+        <h2 style="margin: 0;">🎾 US Open ticket alert</h2>
+        <p style="margin: 4px 0 0; font-size: 13px; opacity: 0.8;">
+          Detected {detected_at} — act quickly, these sell fast
+        </p>
+      </div>
 
-        browser.close()
+      <div style="padding: 16px 20px; background: #eaf2fb; border-bottom: 1px solid #d0e8f7;">
+        <p style="margin: 0 0 8px; font-size: 12px; color: #555; text-transform: uppercase;">Your alert criteria</p>
+        <span style="font-size: 13px; background: #d6eaf8; color: #1a5276; padding: 4px 10px; border-radius: 6px; margin-right: 6px;">📍 {criteria['venue']}</span>
+        <span style="font-size: 13px; background: #d6eaf8; color: #1a5276; padding: 4px 10px; border-radius: 6px; margin-right: 6px;">📅 {criteria['date_range']}</span>
+        <span style="font-size: 13px; background: #d6eaf8; color: #1a5276; padding: 4px 10px; border-radius: 6px;">💲 Max ${criteria['max_price']}</span>
+      </div>
 
-    return results
+      <div style="padding: 20px;">
+        <p style="margin: 0 0 12px; font-size: 12px; color: #888; text-transform: uppercase;">{count} new listing{'s' if count != 1 else ''} found</p>
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+          {rows}
+        </table>
+      </div>
 
+      <div style="padding: 14px 20px; border-top: 1px solid #eee; text-align: right;">
+        <a href="{TICKETMASTER_URL}" style="background: #1a5276; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px;">
+          View all listings →
+        </a>
+      </div>
 
-def send_email(subject: str, body: str):
+      <div style="padding: 12px 20px; font-size: 11px; color: #aaa;">
+        Sent by your US Open ticket watcher script.
+      </div>
+    </div>
+    </body></html>"""
+
+def send_alert(listings: list[dict]):
+    if not listings:
+        print("No listings found, skipping email.")
+        return
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = GMAIL_ADDRESS
-    msg["To"]      = NOTIFY_EMAIL
+    msg["Subject"] = f"🎾 US Open tickets found ({len(listings)} listing{'s' if len(listings) != 1 else ''})"
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = RECIPIENT_EMAIL
 
-    msg.attach(MIMEText(body, "plain"))
+    html = build_html_email(listings)
+    msg.attach(MIMEText(html, "html"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASS)
-        server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAIL, msg.as_string())
-    print("Alert email sent.")
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def main():
-    print(f"Checking: {TICKET_URL}")
-    current = scrape_tickets(TICKET_URL)
-    last    = load_last_state()
-
-    new_listings = {k: v for k, v in current.items() if k not in last}
-    changed      = current != last
-
-    if new_listings:
-        subject = "🎾 US Open tickets found!"
-        lines   = [f"New ticket listings detected:\n"]
-        for label in new_listings:
-            lines.append(f"  • {label}")
-        lines.append(f"\nBuy now: {TICKET_URL}")
-        body = "\n".join(lines)
-        send_email(subject, body)
-
-    elif changed and "__page_hash__" in current:
-        # Fallback: page changed but we couldn't parse specific cards
-        subject = "🎾 US Open ticket page changed — check now!"
-        body    = (
-            "The US Open ticket page has changed since the last check.\n"
-            "This may mean tickets have gone on sale.\n\n"
-            f"Check here: {TICKET_URL}"
-        )
-        send_email(subject, body)
-
-    else:
-        print("No changes detected.")
-
-    save_state(current)
-
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, msg.as_string())
+        print(f"Alert sent for {len(listings)} listing(s).")
 
 if __name__ == "__main__":
-    main()
+    listings = scrape_listings()
+    send_alert(listings)
